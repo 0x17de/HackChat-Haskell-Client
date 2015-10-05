@@ -3,8 +3,10 @@ HackChat Haskell Client
 
 Required Packages
 -----------------
-websockets
-mtl
-aeson
-concurrent-extra
+ * c2hs
+ * ncurses
+ * websockets
+ * mtl
+ * aeson
+ * concurrent-extra
 
