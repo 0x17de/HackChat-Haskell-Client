@@ -56,8 +56,7 @@ waitFor w p = loop where
 
 app :: MVar Bool -> WS.ClientApp()
 app stopping conn = do
-    let joinCmd = cmdJoin cfg_channel cfg_nick
-    WS.sendTextData conn $ joinCmd
+    WS.sendTextData conn $ cmdJoin cfg_channel cfg_nick
 
     recvThreadId <- forkIO $ forever $ do
         _ <- return.toStrict =<< WS.receiveData conn
