@@ -19,7 +19,7 @@ import qualified Network.WebSockets as WS
 import Data.Aeson as J
 import Data.Text.Lazy.Encoding as E
 
-import UI.NCurses as N
+import qualified UI.HSCurses.Curses as N
 import Unsafe.Coerce
 
 
@@ -28,6 +28,19 @@ cfg_server = "toastystoemp.com"
 cfg_port = 6060
 cfg_channel = "programming"
 cfg_nick = "HaskellNick"
+
+
+
+newEventQueue :: IO (MVar [a])
+newEventQueue = newMVar []
+addEvent :: (MVar [a]) -> a -> IO()
+addEvent q e = do
+    takeMVar q >>= \x -> putMVar q (x++[e]) >> return ()
+takeEvent :: MVar [a] -> IO a
+takeEvent q = do
+    (x:xs) <- takeMVar q
+    putMVar q xs
+    return x
 
 
 
@@ -44,18 +57,8 @@ cmdJoin channel nick = do
 
 
 
-waitFor :: Window -> (N.Event -> Bool) -> Curses ()
-waitFor w p = loop where
-    loop = do
-        ev <- getEvent w Nothing
-        case ev of
-            Nothing -> loop
-            Just ev' -> if p ev' then return () else loop
-
-
-
-app :: MVar Bool -> WS.ClientApp()
-app stopping conn = do
+app :: MVar Bool -> MVar [a] -> WS.ClientApp()
+app stopping guiEvents conn = do
     WS.sendTextData conn $ cmdJoin cfg_channel cfg_nick
 
     recvThreadId <- forkIO $ forever $ do
@@ -80,60 +83,33 @@ app stopping conn = do
 
 
 
-runGui :: MVar Bool -> IO()
-runGui clientStopping = do
-    runCurses $ do
-        window <- defaultWindow
-        oldCursorMode <- setCursorMode CursorInvisible
+runGui :: MVar Bool -> MVar [a] -> IO()
+runGui clientStopping netEvents = do
+    window <- N.initScr
+    oldCursorMode <- N.cursSet N.CursorInvisible
+    
+    -- TODO: Render chat and updates here
+
+    let loop = do
+        key <- N.getCh
+        case key of
+            N.KeyCancel -> liftIO $ takeMVar clientStopping >> putMVar clientStopping True
         
-        N.updateWindow window $ do
-            moveCursor 1 10
-            drawString "Hello World!"
-            moveCursor 3 10
-            drawString "(press q to quit)"
-            moveCursor 0 0
-            drawBox Nothing Nothing
-        N.render
-        
-        -- TODO: Render chat and updates here
-{-
-
-        liftIO $ unCurse $ do
-            N.updateWindow (chatWindow c) $ do
-                moveCursor 1 10
-                drawString $ T.unpack msg
-                moveCursor 0 0
-                drawBox Nothing Nothing
-            N.render
-
-    unCurse $ do
-        N.updateWindow (chatWindow c) $ do
-            moveCursor 1 10
-            drawString "Connected!"
-            moveCursor 0 0
-            drawBox Nothing Nothing
-        N.render
--}
-        
-        let loop = do
-            ev <- getEvent window (Just 300)
-            let quit = case ev of
-                            Just e -> e == EventCharacter 'q' || e == EventCharacter 'Q'
-                            Nothing -> False
-
-            if quit then do
-                liftIO $ takeMVar clientStopping >> putMVar clientStopping True >> return ()
-            else loop
-        loop
-        
-        _ <- setCursorMode oldCursorMode
-        return ()
+        stopping <- readMVar clientStopping
+        case stopping of
+            True  -> return ()
+            False -> loop
+    loop
+    
+    _ <- N.cursSet oldCursorMode
+    N.endWin
+    return ()
 
 
 
-runNet :: MVar Bool -> IO()
-runNet stopping = do
-    withSocketsDo $ WS.runClient cfg_server cfg_port "/chat-ws" (app stopping)
+runNet :: MVar Bool -> MVar [a] -> IO()
+runNet stopping guiEvents = do
+    withSocketsDo $ WS.runClient cfg_server cfg_port "/chat-ws" (app stopping guiEvents)
 
 
 
@@ -141,8 +117,11 @@ main :: IO()
 main = do
     clientStopping <- newMVar False
 
-    (_, guiWait) <- Thread.forkOS $ runGui clientStopping
-    (_, netWait) <- Thread.forkOS $ runNet clientStopping
+    guiEvents <- newEventQueue
+    netEvents <- newEventQueue
+
+    (_, guiWait) <- Thread.forkOS $ runGui clientStopping netEvents
+    (_, netWait) <- Thread.forkOS $ runNet clientStopping guiEvents
 
     netWait >> guiWait >> (return $! ())
 
