@@ -12,6 +12,7 @@ import Control.Monad.Trans (liftIO)
 import Control.Monad.State (modify)
 import Control.Exception.Base (mask, onException, catch, SomeException)
 import Network.Socket (withSocketsDo)
+import Data.Char (chr)
 import Data.Text (Text)
 import Data.Text.Lazy (toStrict)
 import qualified Data.Text as T
@@ -34,7 +35,7 @@ cfg_nick = "HaskellNick"
 
 
 
-data Event = EventButton C.CInt | EventNop
+data Event = EventButton C.CInt | EventNop | EventSend String | EventTimeout
 data Queue = Queue (MVar Bool) (MVar [Event])
 
 
@@ -48,7 +49,7 @@ addEvent (Queue lock queue) e = do
     a <- takeMVar queue
     success <- tryPutMVar lock True
     putMVar queue (a++[e])
-    return ()
+    return $! ()
     
 takeEvent :: Queue -> IO Event
 takeEvent q = do
@@ -88,13 +89,29 @@ app clientStopping guiEvents netEvents conn = do
     pingThreadId <- forkIO $ forever $ do
         delay (60*1000*1000) >> WS.sendTextData conn (cmdPing)
 
-    let loop = do
+    timeoutThreadId <- forkIO $ forever $ do
+        delay (300*1000) >> addEvent netEvents EventTimeout
+
+    let loop :: IO()
+        loop = do
         stopping <- readMVar clientStopping
         case stopping of
-            True  -> return ()
-            False -> delay (300*1000) >> loop
+            True  -> return $! ()
+            False -> do
+                hPutStrLn stderr "EVENT"
+                e <- takeEvent netEvents
+                hPutStrLn stderr "AfterTake"
+                case e of
+                    EventSend msg -> do
+                        hPutStrLn stderr $ "Sending Message: "++msg
+                        WS.sendTextData conn $ cmdChat $ T.pack msg
+                    EventTimeout -> return $! ()
+                    otherwise -> return $! ()
+                hPutStrLn stderr "AfterCase"
+                loop
     loop
 
+    killThread timeoutThreadId
     killThread recvThreadId
     killThread pingThreadId
 
@@ -122,35 +139,44 @@ runGui clientStopping guiEvents netEvents = do
     
     -- REFRESH
     --N.wRefresh window
-    
+
+    chatMessage <- newMVar ""
+
     -- LOOP
     -- keyboard events
     keyboardThread <- forkIO $ forever $ do
-        hPutStrLn stderr $ "Key"
         keyCode <- N.getch
-        hPutStrLn stderr $ "KeyCode " ++ (show keyCode)
         addEvent guiEvents (EventButton keyCode)
-        return ()
+        return $! ()
 
     -- process keyboard events
     let processButtonAction :: C.CInt -> IO()
-        processButtonAction keyCode = do
+        processButtonAction ckeyCode = do
+            let keyCode = fromIntegral ckeyCode :: Int
             liftIO $ hPutStrLn stderr $ "Keycode " ++ (show keyCode)
-            when (keyCode == 27) $ liftIO $ takeMVar clientStopping >> putMVar clientStopping True
-            return ()
+            case keyCode of
+                27 -> liftIO $ takeMVar clientStopping >> putMVar clientStopping True
+                10 -> do
+                    msg <- takeMVar chatMessage
+                    putMVar chatMessage ""
+                    addEvent netEvents $ EventSend msg
+                    hPutStrLn stderr $ "Sending Message: "++msg
+                otherwise -> do
+                    msg <- takeMVar chatMessage
+                    let msg' = msg ++ [chr $ fromIntegral keyCode]
+                    putMVar chatMessage msg'
+                    hPutStrLn stderr $ "New Message: "++msg'
+            return $! ()
 
     -- main event loop
     let eventLoop :: IO()
         eventLoop = do
-            hPutStrLn stderr "LOOP"
             stopping <- readMVar clientStopping
             unless(stopping) $ do
-                hPutStrLn stderr "UNLESS"
                 e <- takeEvent guiEvents
-                hPutStrLn stderr "UNLESS_1"
                 case e of
                     EventButton button -> processButtonAction button
-                    EventNop -> return ()
+                    EventNop -> return $! ()
                 eventLoop
 
     -- SPAWN
@@ -171,7 +197,7 @@ runNet stopping guiEvents netEvents = do
         (\e -> do
                     let err = show (e :: SomeException)
                     hPutStrLn stderr ("Error: " ++ err)
-                    return ())
+                    return $! ())
 
 
 
